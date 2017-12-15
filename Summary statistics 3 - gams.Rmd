@@ -1,0 +1,111 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# GAMs of zostera metrics, location, site, and temp on epifauna abundance
+https://m-clark.github.io/docs/GAM.html
+
+
+```{r Basics -- packages, data entry}
+library(tidyr)
+library(lubridate)
+library(zoo)
+library(dplyr)
+library(MASS) # support for statistical analyses
+library(mgcv) # for gams
+
+avg <- function(x) sum(x, na.rm=TRUE)/length(na.omit(x)) # means
+
+data <- read.csv("cleaned-master-subsample-data.csv", header = TRUE)
+data$quadrat <- paste0("q", data$quadrat)
+data$yearmon <- as.yearmon(with(data, paste(year, month, sep="-")))
+data$yearmon.site <- with(data, paste(yearmon, site, sep="."))
+data$s.tot.inv <- data$tot.inv/data$regleafarea
+data$s.totegg <- data$totegg/data$regleafarea
+temp <- read.csv("predicted.temp.csv", header = TRUE) %>%
+    select_at(vars(-X)) %>%
+    rename(Doran = dorantemp.pred, Westside = westsidetemp.pred) %>%
+    gather(site, pred.temp, Doran, Westside)
+
+data <- full_join(data, temp)
+
+shootdensity <- read.csv("Shootdensity.csv", header = TRUE) %>%
+    filter(site != "Channel")
+shootdensity <- droplevels(shootdensity)
+shootdensity$quadrat <- paste0("q", shootdensity$quadrat)
+shootdensity$yearmon <- as.yearmon(with(shootdensity, paste(year, month, sep="-")))
+shootdensity$yearmon.site <- with(shootdensity, paste(yearmon, site, sep="."))
+
+qdiv <- read.csv("qdiv.csv", header = TRUE)
+qdiv <- as.data.frame(qdiv)
+qdiv$yearmon <- as.yearmon(qdiv$yearmon)
+qdiv$month <- month(qdiv$yearmon)
+qdiv$year <- year(qdiv$yearmon)
+
+q <- data %>%
+    select_at(vars(c(-X, -subsample, -month.n, 
+         -leaf, -length, -width, -raw.totleafarea))) %>%
+    group_by(yearmon, year, month, site, yearmon.site, quadrat) %>%
+    summarise_all(funs(avg)) %>%
+    mutate(s.tot.inv = tot.inv/regleafarea, s.totegg = totegg/regleafarea)
+q[q == "NaN"] <- NA
+
+qdata <- full_join(q, qdiv[,-1]) %>%
+    filter(is.na(yearmon) == FALSE) %>%
+    mutate(epiphyteload.totalleafarea = epiphyteload.totalleafarea*1000)
+qdata <- as.data.frame(qdata)
+write.csv(qdata, "AbundanceMS-full-dataset.csv")
+```
+
+
+```{r gam - inverts - stepwise model selection}
+gamobj <- gam(tot.inv ~ yearmon + site + s(pred.temp) + s(shootdensity.m2) + s(regleafarea) + s(epiphyteload.totalleafarea), data = qdata)
+plot(gamobj, shade = TRUE) # everything except pred.temp looks linear
+summary(gamobj)
+
+# getting rid of site
+gamobj <- gam(tot.inv ~ s(shootdensity.m2) + s(regleafarea) + s(epiphyteload.totalleafarea) + yearmon + s(pred.temp), data = qdata)
+plot(gamobj, shade = TRUE) # still wiggly
+summary(gamobj)
+
+# getting rid of shoot density
+gamobj <- gam(tot.inv ~ s(regleafarea) + s(epiphyteload.totalleafarea) + yearmon + s(pred.temp), data = qdata)
+summary(gamobj)
+```
+
+```{r gam on eelgrass - shootdensity}
+# shootdensity
+gamobj <- gam(shootdensity.m2 ~ yearmon + site + s(pred.temp), data = qdata)
+#plot(gamobj, shade = TRUE)
+summary(gamobj) # in full model, only yearmon is significant
+
+gamobj <- gam(shootdensity.m2 ~ yearmon + s(pred.temp), data = qdata)
+summary(gamobj) # when we take out site, temperature becomes significant
+```
+```{r gam on eelgrass - leafarea}
+# leafarea
+gamobj <- gam(regleafarea ~ yearmon + site + s(pred.temp), data = qdata)
+#plot(gamobj, shade = TRUE)
+summary(gamobj) # in full model: both yearmon and temp significant
+
+gamobj <- gam(regleafarea ~ yearmon + s(pred.temp), data = qdata)
+summary(gamobj) # taking out site doesn't change the results from full model
+```
+```{r gam on eelgrass - epiload}
+# epiphyteload
+gamobj <- gam(epiphyteload.totalleafarea ~ yearmon + site + s(pred.temp), data = qdata)
+#plot(gamobj, shade = TRUE)
+summary(gamobj) # in full model, only site is significant
+
+gamobj <- gam(epiphyteload.totalleafarea ~ site + s(pred.temp), data = qdata)
+summary(gamobj)
+ # when I take yearmon out, temp becomes significant too
+```
+```{r is the nonlinearity significant?}
+mdl1 <- gam(tot.inv ~ s(shootdensity.m2) + s(regleafarea) + s(epiphyteload.totalleafarea) + yearmon + site + s(pred.temp), data = qdata)
+mdl2 <- gam(tot.inv ~ s(shootdensity.m2) + s(regleafarea) + s(epiphyteload.totalleafarea) + yearmon + site + pred.temp, data = qdata)
+
+anova(mdl1, mdl2, test="Chisq")
+ #yep, nonlinearity is significant
+```

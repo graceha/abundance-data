@@ -1,0 +1,195 @@
+---
+title: "Abundance Survey Summary Statistics, Revisions -- Temperature?"
+output: html_notebook
+---
+# Intro
+10/30/2017
+This is an addition to Summary statistics 2.Rmd, to explore how temperature could have affected seagrass/epifauna response variables. Going to use hourly temperature data from both the harbor (Jess Abbott's hobologgers at Doran and Westside eelgrass) and from the BOON observing sensors (shorestation and buoy)
+Also, just nota bene: I compiled all sorts of BOON data into one massive dataset here: compiled.BOON.csv
+The original code can be found in organizingBOON.R
+
+# Temperature: do a regression between BOON and compiled jess/laura temp data to model harbor data; apply modeled temp to seagrass/epifauna response vars
+-House-keeping -- working directory and necessary packages
+-Import survey data, jess data, and BOON data
+-Clean all the temperature time series data to be standardized
+```{r packages}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(car)
+library(gvlma)
+library(mgcv)
+library(nlme)
+library(multcomp)
+library(bbmle)
+```
+```{r Importing and cleaning hourly boon data}
+setwd("~/Google Drive/Grace Ha Projects/Bodega Harbor/Abundance Surveys/Data")
+
+# hourly shorestation data from 2011-2014
+df <- read.csv("bml_seawater_temperature_2011_hourly.csv", header=FALSE)
+sh.sal.h11 <- df[, c(2,4)] %>% 
+  rename(datetime=V2, shorestation.temp=V4) %>%
+  unique()
+df <- read.csv("bml_seawater_temperature_2012_hourly.csv", header=FALSE)
+sh.sal.h12 <- df[, c(2,4)] %>% 
+  rename(datetime=V2, shorestation.temp=V4) %>%
+  unique()
+df <- read.csv("bml_seawater_temperature_2013_hourly.csv", header=FALSE)
+sh.sal.h13 <- df[, c(2,4)] %>% 
+  rename(datetime=V2,shorestation.temp=V4) %>%
+  unique()
+df <- read.csv("bml_seawater_temperature_2014_hourly.csv", header=FALSE)
+sh.sal.h14 <- df[, c(2,4)] %>% 
+  rename(datetime=V2, shorestation.temp=V4) %>%
+  unique()
+
+sh1 <- full_join(sh.sal.h11, sh.sal.h12)
+sh2 <- full_join(sh.sal.h13, sh.sal.h14)
+sh3 <- full_join(sh1, sh2)
+sh3$datetime <- ymd_hms(sh3$datetime)
+sh3$datetime <- with_tz(sh3$datetime, "America/Los_Angeles")
+
+
+
+# hourly buoy data from 2012-2014
+df <- read.csv("buoy_wqm_temperature_2012_hourly.csv", header=FALSE)
+buoy.temp.h12 <- df[, c(2,4)] %>% 
+  rename(datetime=V2, buoy.temp=V4) %>%
+  unique()
+df <- read.csv("buoy_wqm_temperature_2013_hourly.csv", header=FALSE)
+buoy.temp.h13 <- df[, c(2,4)] %>% 
+  rename(datetime=V2,  buoy.temp=V4) %>%
+  unique()
+df <- read.csv("buoy_wqm_temperature_2014_hourly.csv", header=FALSE)
+buoy.temp.h14 <- df[, c(2,4)] %>% 
+  rename(datetime=V2,  buoy.temp=V4) %>%
+  unique()
+
+buoy1 <- full_join(buoy.temp.h12, buoy.temp.h13)
+buoy2 <- full_join(buoy1, buoy.temp.h14)
+buoy2$datetime <- ymd_hms(buoy2$datetime)
+buoy2$datetime <- with_tz(buoy2$datetime, "America/Los_Angeles")
+
+hr <- full_join(sh3, buoy2) 
+
+# Jess's intertidal hobologger data from doran and westside
+jess.doran <- read.csv("jess_doran_temp.csv", header=TRUE) %>%
+    mutate(doran.temp = (temp.f - 32)*(5/9)) %>%
+    rename(datetime = datetime.gmtmin7) %>%
+    select_at(vars(datetime, doran.temp))
+
+jess.westside <- read.csv("jess_westside_temp.csv", header=TRUE) %>%
+    mutate(westside.temp = (temp.f - 32)*(5/9)) %>%
+    rename(datetime = datetime.gmtmin7) %>%
+    select_at(vars(datetime, westside.temp))
+
+jess <- full_join(jess.doran, jess.westside)
+
+jess.westside$datetime <- as.POSIXct(jess.westside$datetime, format = "%m/%d/%y %H:%M" , tz = "America/Los_Angeles")
+jess.doran$datetime <- as.POSIXct(jess.doran$datetime, format = "%m/%d/%y %H:%M" , tz = "America/Los_Angeles")
+jess$datetime <- as.POSIXct(jess$datetime, format = "%m/%d/%y %H:%M" , tz = "America/Los_Angeles")
+
+# Combining Jess (harbor) and BOON data into one dataset
+temp.data <- full_join(jess, hr) 
+```
+```{r plotting all of the temps}
+temp.melted <- temp.data %>%
+    rename(doran = doran.temp, westside = westside.temp, 
+           shorestation = shorestation.temp, buoy = buoy.temp) %>%
+    gather(site, temp, doran, westside, shorestation)
+all.temps <- ggplot(temp.melted, aes(x=datetime, y=temp)) + geom_point(aes(colour=site))
+all.temps
+ggsave("harbor.shore.temps.png", height = 6, width = 8, units = "in")
+```
+```{r diff between sites in temp?}
+# just getting doran and westside
+data <- temp.data %>%
+    filter(is.na(doran.temp) == FALSE) %>%
+    filter(is.na(westside.temp) == FALSE)
+
+tvar <- data %>%
+    gather(site, temp, doran.temp, westside.temp) 
+tvar1 <- tvar %>%
+    group_by(site) %>%
+    summarise(tvar = var(temp)) 
+with(tvar1, max(tvar)/min(tvar)) 
+#greater than 3? Move on to Mann-Whitney test; if not, stay with Levene/t-test
+
+# testing for normality
+m <- lm(temp ~ site, tvar)
+shapiro.test(head(sample(m$residuals), 5000)) # using a randomized pool of 5000 residuals; W is greater than 0.95
+leveneTest(m) # significant levene's test --> var.equal=FALSE
+plot(m) # decent residual plot, pretty good QQ plot
+
+t.test(temp ~ site, tvar, var.equal = FALSE) 
+boxplot(temp ~ site, tvar)
+```
+Cannot use the same regression for both sites; they are significantly different in temp
+
+
+Apply regression between BOON data and jess/laura data
+```{r comparing shorestation and westside}
+df <- temp.data %>%
+    filter(shorestation.temp > 7 & shorestation.temp < 18 & 
+               is.na(shorestation.temp) == FALSE) %>%
+    filter(westside.temp > 7 & westside.temp < 18 & 
+               is.na(westside.temp) == FALSE) %>%
+    filter(doran.temp > 7 & doran.temp < 18 & is.na(doran.temp) == FALSE) %>%
+    mutate(year = year(datetime))
+
+with(df, plot(westside.temp ~ shorestation.temp)) 
+with(df[df$year == 2012,], plot(westside.temp ~ datetime))
+points(shorestation.temp ~ datetime, df[df$year == 2012,], col = "red")
+
+with(df[df$year >2012,], plot(westside.temp ~ datetime))
+points(shorestation.temp ~ datetime, df[df$year >2012 ,], col = "red")
+with(df[df$year > 2012,], plot(westside.temp ~ shorestation.temp)) 
+
+temp.gam <- gam(westside.temp ~ s(shorestation.temp), data = df)
+plot(temp.gam) 
+```
+```{r comparing shorestation and doran}
+with(df, plot(doran.temp ~ shorestation.temp)) 
+with(df[df$year == 2012,], plot(doran.temp ~ datetime))
+points(shorestation.temp ~ datetime, df[df$year == 2012,], col = "red")
+
+with(df[df$year >2012,], plot(doran.temp ~ datetime))
+points(shorestation.temp ~ datetime, df[df$year >2012 ,], col = "red")
+with(df[df$year > 2012,], plot(doran.temp ~ shorestation.temp)) 
+
+temp.gam <- gam(doran.temp ~ s(shorestation.temp), data = df)
+plot(temp.gam) 
+```
+
+```{r modeling harbor sites from shorestation}
+model <- lm(westside.temp ~ shorestation.temp, df) # R^2 = 0.58
+modsum <- summary(model)
+
+intercept.wes <- coef(modsum)[1]
+slope.wes <- coef(modsum)[2]
+# --> westside.pred = slope.wes*shorestation + intercept.wes
+
+model <- lm(doran.temp ~ shorestation.temp, df) # R^2 = 0.36
+modsum <- summary(model)
+
+intercept.dor <- coef(modsum)[1]
+slope.dor <- coef(modsum)[2]
+# --> doran.pred = slope.dor*shorestation + intercept.dor
+
+temp.df1 <- temp.data %>%
+    select_at(vars(datetime, shorestation.temp)) %>%
+    filter(is.na(shorestation.temp) == FALSE) %>%
+    mutate(dorantemp.pred = slope.dor*shorestation.temp + intercept.dor,
+        westsidetemp.pred = slope.wes*shorestation.temp + intercept.wes, 
+        month = month(datetime), year = year(datetime)) %>%
+    filter(year > 2012) %>%
+    group_by(year, month) %>%
+    summarize_at(vars(dorantemp.pred, westsidetemp.pred), funs(mean))
+
+temp.df2 <- as.data.frame(temp.df1[9:24,])
+
+write.csv(temp.df2, "predicted.temp.csv")
+```
+
